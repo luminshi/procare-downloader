@@ -634,6 +634,38 @@ def test_idless_records_stay_distinct():
     assert pd.record_dedup_key(dict(base, comment="first")) == pd.record_dedup_key(a)
 
 
+def test_ranged_run_merges_into_saved_feed():
+    # A ranged run must not shrink feed.json to its own window, or "rebuild the
+    # scrapbook only" would render just that window.
+    old = [{"name": "Ava", "class_name": "Toddlers", "folder": "", "records": [
+        {"id": 1, "activity_time": "2024-01-05T09:00:00", "comment": "jan"},
+        {"id": 2, "activity_time": "2024-02-05T09:00:00", "comment": "feb (old copy)"}]}]
+    new = [{"name": "Ava", "class_name": "Toddlers", "folder": "", "records": [
+        {"id": 2, "activity_time": "2024-02-05T09:00:00", "comment": "feb (new copy)"},
+        {"id": 3, "activity_time": "2024-03-05T09:00:00", "comment": "mar"}]}]
+    merged = pd.merge_feed_sections(old, new)
+    assert len(merged) == 1 and merged[0]["added_old"] == 1
+    by_id = {r["id"]: r["comment"] for r in merged[0]["records"]}
+    assert by_id == {1: "jan", 2: "feb (new copy)", 3: "mar"}
+    # A saved section this run didn't touch survives; nothing saved -> passthrough.
+    other = [{"name": "Ben", "folder": "Ben", "records": [{"id": 9}]}]
+    assert [s["folder"] for s in pd.merge_feed_sections(other, new)] == ["", "Ben"]
+    assert pd.merge_feed_sections([], new)[0]["added_old"] == 0
+
+
+def test_load_feed_sections_formats():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "feed.json")
+        assert pd.load_feed_sections(path) == []  # missing
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"activities": [{"id": 1}], "class_name": "K"}')
+        legacy = pd.load_feed_sections(path)
+        assert legacy[0]["folder"] == "" and legacy[0]["records"] == [{"id": 1}]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"sections": [{"folder": "A", "records": []}]}')
+        assert pd.load_feed_sections(path) == [{"folder": "A", "records": []}]
+
+
 def test_idless_media_stay_distinct():
     # Two photos recognized as media (end in .jpg) but with a blank filename stem
     # must get distinct, stable idents — never both the literal "None".

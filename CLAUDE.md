@@ -232,6 +232,10 @@ it idempotent; `--overwrite` re-tags everything.
   NOT auto-detected (no reliable field) — only shown if `--school` is passed.
 - Re-runs are idempotent (skip existing files, matched by stem across months).
 - `--scrapbook-only` rebuilds from `Scrapbook/feed.json` with no login (falls back to legacy root `feed.json`).
+  **feed.json is cumulative:** a scrapbook-building run folds its sections into the saved feed
+  (`merge_feed_sections`, union per `folder` on `record_dedup_key`, new copy wins) instead of
+  overwriting it. It used to be overwritten, so a small-range run shrank feed.json, and with it every
+  later rebuild, down to that one window.
 - **`--password-stdin`** reads the password from stdin's first line (`read_password`) for scripted runs
   (e.g. `op read … | … --password-stdin`). Empty stdin **exits** rather than logging in blank — a blank
   password would burn one of the few attempts before Procare locks the account. Never accept the
