@@ -167,8 +167,12 @@ source of a file's folder.
 **Multi-photo posts render as one card, not one per photo.** Procare represents a batch upload as one
 `photo_activity` record *per photo*, but stamps every record in the batch with the same `activity_time`,
 `comment` and `activity_type`. `scrapbook.group_records` collapses a day's content records by that exact
-key (`_group_key`), so a 12-photo post shows the caption once with all 12 photos in a `.media-grid` (CSS
-masonry). Verified against a real account: within any one `activity_time` the caption is always
+key (`_group_key`), so a 12-photo post shows the caption once with all 12 photos in a `.media-grid`. The grid is a
+row-major CSS grid of square `object-fit:cover` tiles (click → full photo in the lightbox), NOT CSS
+multi-column masonry: masonry re-balances columns every time a lazy image loads, so photos visibly
+jumped between columns. Every `<img>` also carries header-read `width`/`height` (`image_size`,
+EXIF-orientation aware) so lazy loads reserve their box, and the lightbox locks page scroll
+(`html.lb-open` + `scrollbar-gutter:stable`) so nothing reflows behind it. Verified against a real account: within any one `activity_time` the caption is always
 byte-identical, so the exact-match key never merges photos that don't belong together, and a caption
 reused on another day stays separate (different time). The key uses `activity_time` and **never falls
 back to `activity_date`**: a date is a whole day, so keying on it would fold every same-type record of
@@ -232,6 +236,10 @@ it idempotent; `--overwrite` re-tags everything.
   NOT auto-detected (no reliable field) — only shown if `--school` is passed.
 - Re-runs are idempotent (skip existing files, matched by stem across months).
 - `--scrapbook-only` rebuilds from `Scrapbook/feed.json` with no login (falls back to legacy root `feed.json`).
+  **feed.json is cumulative:** a scrapbook-building run folds its sections into the saved feed
+  (`merge_feed_sections`, union per `folder` on `record_dedup_key`, new copy wins) instead of
+  overwriting it. It used to be overwritten, so a small-range run shrank feed.json, and with it every
+  later rebuild, down to that one window.
 - **`--password-stdin`** reads the password from stdin's first line (`read_password`) for scripted runs
   (e.g. `op read … | … --password-stdin`). Empty stdin **exits** rather than logging in blank — a blank
   password would burn one of the few attempts before Procare locks the account. Never accept the

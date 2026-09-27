@@ -1436,6 +1436,51 @@ def write_private_json(path, data):
             pass
 
 
+def load_feed_sections(path):
+    """Sections saved in a feed.json, or [] if it's missing/unreadable. A legacy
+    root feed.json (single merged scrapbook, records under `activities`) comes
+    back as one section with folder ""."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    sections = data.get("sections")
+    if sections is None:
+        return [{"name": None, "class_name": data.get("class_name"), "folder": "",
+                 "records": data.get("activities") or []}]
+    return sections
+
+
+def merge_feed_sections(old_sections, new_sections):
+    """Fold a run's `new_sections` into the sections already saved in feed.json.
+
+    A ranged run only fetches its own window, so writing its sections verbatim
+    would throw away every month an earlier run archived -- and "rebuild the
+    scrapbook only" would then render just that window. Records are unioned per
+    section (matched by `folder`) on `record_dedup_key`, the new copy winning;
+    saved sections this run didn't touch are kept as-is. Returns new dicts; each
+    merged section carries `added_old` = how many saved records it brought back.
+    """
+    old_by_folder = {s.get("folder") or "": s for s in old_sections}
+    merged, used = [], set()
+    for s in new_sections:
+        folder = s.get("folder") or ""
+        used.add(folder)
+        records = list(s.get("records") or [])
+        new_keys = {record_dedup_key(r) for r in records}
+        old = old_by_folder.get(folder)
+        extra = [r for r in (old or {}).get("records") or []
+                 if record_dedup_key(r) not in new_keys]
+        merged.append(dict(s, records=extra + records, added_old=len(extra)))
+    for s in old_sections:
+        folder = s.get("folder") or ""
+        if folder not in used and s.get("records"):
+            used.add(folder)
+            merged.append(dict(s, added_old=len(s["records"])))
+    return merged
+
+
 def in_range(dt, since_dt, until_dt):
     """True if dt falls within the (optional) since/until bounds."""
     if dt is None:
@@ -2216,15 +2261,26 @@ def run(args):
 
     if want_scrapbook:
         os.makedirs(os.path.dirname(feed_path), exist_ok=True)
+        # Keep what earlier runs archived: a ranged run must not shrink the feed
+        # (or the scrapbook) down to just its own window.
+        book = merge_feed_sections(load_feed_sections(read_feed), sections)
+        for s in book:
+            # Re-detect the class over the full merged span, unless --class-name
+            # pinned it; the Shared Gallery has no class.
+            if s["added_old"] and not args.class_name and not s.get("shared"):
+                s["class_name"] = scrapbook.detect_class_name(s["records"]) or s.get("class_name")
+            if not s.get("name"):  # unmatched section from a legacy root feed.json
+                s["name"] = "Earlier scrapbook"
         feed_data = {"generated_at": datetime.now().isoformat(), "school": school,
                      "sections": [{"name": s["name"], "class_name": s["class_name"],
-                                   "folder": s["folder"], "records": s["records"]}
-                                  for s in sections]}
+                                   "folder": s["folder"], "records": s["records"],
+                                   "shared": s.get("shared", False)}
+                                  for s in book]}
         # Strip signed/expiring query strings and keep the file owner-only (POSIX).
         write_private_json(feed_path, scrub_signed_urls(feed_data))
         pages = scrapbook.build_scrapbook(
             [{"name": s["name"], "class_name": s["class_name"], "folder": s["folder"],
-              "records": s["records"], "shared": s.get("shared", False)} for s in sections],
+              "records": s["records"], "shared": s.get("shared", False)} for s in book],
             out_dir, school=school)
         announce_scrapbook(out_dir, pages)
 

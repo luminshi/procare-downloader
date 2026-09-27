@@ -634,6 +634,38 @@ def test_idless_records_stay_distinct():
     assert pd.record_dedup_key(dict(base, comment="first")) == pd.record_dedup_key(a)
 
 
+def test_ranged_run_merges_into_saved_feed():
+    # A ranged run must not shrink feed.json to its own window, or "rebuild the
+    # scrapbook only" would render just that window.
+    old = [{"name": "Ava", "class_name": "Toddlers", "folder": "", "records": [
+        {"id": 1, "activity_time": "2024-01-05T09:00:00", "comment": "jan"},
+        {"id": 2, "activity_time": "2024-02-05T09:00:00", "comment": "feb (old copy)"}]}]
+    new = [{"name": "Ava", "class_name": "Toddlers", "folder": "", "records": [
+        {"id": 2, "activity_time": "2024-02-05T09:00:00", "comment": "feb (new copy)"},
+        {"id": 3, "activity_time": "2024-03-05T09:00:00", "comment": "mar"}]}]
+    merged = pd.merge_feed_sections(old, new)
+    assert len(merged) == 1 and merged[0]["added_old"] == 1
+    by_id = {r["id"]: r["comment"] for r in merged[0]["records"]}
+    assert by_id == {1: "jan", 2: "feb (new copy)", 3: "mar"}
+    # A saved section this run didn't touch survives; nothing saved -> passthrough.
+    other = [{"name": "Ben", "folder": "Ben", "records": [{"id": 9}]}]
+    assert [s["folder"] for s in pd.merge_feed_sections(other, new)] == ["", "Ben"]
+    assert pd.merge_feed_sections([], new)[0]["added_old"] == 0
+
+
+def test_load_feed_sections_formats():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "feed.json")
+        assert pd.load_feed_sections(path) == []  # missing
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"activities": [{"id": 1}], "class_name": "K"}')
+        legacy = pd.load_feed_sections(path)
+        assert legacy[0]["folder"] == "" and legacy[0]["records"] == [{"id": 1}]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"sections": [{"folder": "A", "records": []}]}')
+        assert pd.load_feed_sections(path) == [{"folder": "A", "records": []}]
+
+
 def test_idless_media_stay_distinct():
     # Two photos recognized as media (end in .jpg) but with a blank filename stem
     # must get distinct, stable idents — never both the literal "None".
@@ -661,6 +693,53 @@ def test_lightbox_and_summary():
     mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
     month = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
     assert "lightbox" in month and "classList.contains('media')" in month
+    assert "lb-open" in month                                       # page scroll locked while open
+
+
+def _jpeg(w, h, orientation=None):
+    """Minimal JPEG header: optional EXIF APP1 (big-endian, one Orientation tag) + SOF0."""
+    out = b"\xff\xd8"
+    if orientation:
+        tiff = b"MM\x00\x2a\x00\x00\x00\x08" + b"\x00\x01" + \
+               b"\x01\x12\x00\x03\x00\x00\x00\x01" + orientation.to_bytes(2, "big") + b"\x00\x00" + \
+               b"\x00\x00\x00\x00"
+        app1 = b"Exif\x00\x00" + tiff
+        out += b"\xff\xe1" + (len(app1) + 2).to_bytes(2, "big") + app1
+    sof = b"\x08" + h.to_bytes(2, "big") + w.to_bytes(2, "big") + b"\x03" + b"\x00" * 9
+    return out + b"\xff\xc0" + (len(sof) + 2).to_bytes(2, "big") + sof + b"\xff\xd9"
+
+
+def test_image_size_reads_headers_and_orientation():
+    # <img width/height> reserves each photo's box before a lazy load; without it
+    # photos start 0px tall and the page (and multi-photo grid) reflows as they arrive.
+    with tempfile.TemporaryDirectory() as d:
+        def put(name, data):
+            p = os.path.join(d, name)
+            open(p, "wb").write(data)
+            return p
+        assert sb.image_size(put("a.jpg", _jpeg(4032, 3024))) == (4032, 3024)
+        # Orientation 6 = rotated 90deg: displayed width/height swap.
+        assert sb.image_size(put("b.jpg", _jpeg(4032, 3024, orientation=6))) == (3024, 4032)
+        assert sb.image_size(put("c.jpg", _jpeg(4032, 3024, orientation=1))) == (4032, 3024)
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + (640).to_bytes(4, "big") + \
+              (480).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+        assert sb.image_size(put("d.png", png)) == (640, 480)
+        assert sb.image_size(put("e.jpg", b"\xff\xd8\xff\x00")) is None      # truncated
+        assert sb.image_size(put("f.mp4", b"\x00\x00\x00\x18ftypmp42")) is None
+        assert sb.image_size(os.path.join(d, "missing.jpg")) is None
+
+
+def test_scrapbook_img_carries_dimensions():
+    out = tempfile.mkdtemp(prefix="sb_dims_")
+    rec = photo_activity("k1", "2025-06-01", "p1")
+    for _url, dt, ident, kind in pd.collect_media_entries(rec):
+        md = pd.media_month_dir(sb.media_root(out), dt, False)
+        os.makedirs(md, exist_ok=True)
+        open(os.path.join(md, pd.media_stem(dt, kind, ident) + ".jpg"), "wb").write(_jpeg(800, 600))
+    sb.build_scrapbook([{"name": "Maya", "class_name": "Room", "folder": "", "records": [rec]}], out)
+    mp = [f for f in os.listdir(os.path.join(out, "Scrapbook")) if f.endswith(").html")][0]
+    month = open(os.path.join(out, "Scrapbook", mp), encoding="utf-8").read()
+    assert 'width="800" height="600"' in month
 
 
 # --------------------------------------------------------------------------- #
