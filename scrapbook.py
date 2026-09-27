@@ -18,6 +18,7 @@ whole output folder together when sharing.
 
 import html
 import os
+import struct
 import urllib.parse
 from collections import OrderedDict
 from datetime import datetime
@@ -176,6 +177,57 @@ def content_text(record):
 # --------------------------------------------------------------------------- #
 # Media
 # --------------------------------------------------------------------------- #
+def _exif_orientation(tiff):
+    """EXIF Orientation (1-8) from a TIFF block, or 1 if absent/unreadable."""
+    try:
+        end = {b"II": "<", b"MM": ">"}[tiff[:2]]
+        ifd = struct.unpack(end + "I", tiff[4:8])[0]
+        (count,) = struct.unpack(end + "H", tiff[ifd:ifd + 2])
+        for n in range(count):
+            e = ifd + 2 + 12 * n
+            if struct.unpack(end + "H", tiff[e:e + 2])[0] == 0x0112:
+                return struct.unpack(end + "H", tiff[e + 8:e + 10])[0]
+    except (KeyError, struct.error):
+        pass
+    return 1
+
+
+def image_size(path):
+    """Displayed (width, height) of a JPEG/PNG from its header, or None. Emitted as
+    <img width/height> so the browser reserves the right box before a lazy image
+    loads -- without it every photo starts 0px tall and the page jumps as they
+    arrive. EXIF orientations 5-8 are rotated 90deg, so width/height swap."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(256 * 1024)
+    except OSError:
+        return None
+    if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+        return struct.unpack(">II", head[16:24])
+    if head[:2] != b"\xff\xd8":
+        return None
+    i, orient = 2, 1
+    while i + 4 <= len(head):
+        if head[i] != 0xFF:
+            return None
+        marker = head[i + 1]
+        if marker == 0xFF:                      # fill byte
+            i += 1
+            continue
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:   # standalone markers
+            i += 2
+            continue
+        (seglen,) = struct.unpack(">H", head[i + 2:i + 4])
+        seg = head[i + 4:i + 2 + seglen]
+        if marker == 0xE1 and seg[:6] == b"Exif\0\0":
+            orient = _exif_orientation(seg[6:])
+        elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and len(seg) >= 5:
+            h, w = struct.unpack(">HH", seg[1:5])
+            return (h, w) if orient in (5, 6, 7, 8) else (w, h)
+        i += 2 + seglen
+    return None
+
+
 def media_html(record, media_dir, pages_dir):
     """Inline <img>/<video> for media attached to this activity. Files live under
     `media_dir`; the link is relative to `pages_dir` (where the HTML page is)."""
@@ -191,7 +243,10 @@ def media_html(record, media_dir, pages_dir):
             pieces.append(f'<video class="media" controls preload="none" '
                           f'src="{rel}"></video>')
         else:
-            pieces.append(f'<img class="media" loading="lazy" src="{rel}" alt="photo">')
+            size = image_size(path)
+            dims = f' width="{size[0]}" height="{size[1]}"' if size else ""
+            pieces.append(f'<img class="media" loading="lazy" decoding="async" '
+                          f'src="{rel}"{dims} alt="photo">')
     return "\n".join(pieces)
 
 
@@ -286,10 +341,14 @@ LIGHTBOX = """<div id="lightbox" class="lightbox"><img alt=""></div>
   var lb=document.getElementById('lightbox'), img=lb.firstElementChild;
   document.addEventListener('click',function(e){
     var t=e.target;
-    if(t.tagName==='IMG'&&t.classList.contains('media')){img.src=t.src;lb.classList.add('on');}
-    else if(lb.classList.contains('on')){lb.classList.remove('on');}
+    if(t.tagName==='IMG'&&t.classList.contains('media')){img.src=t.src;set(true);}
+    else if(lb.classList.contains('on')){set(false);}
   });
-  document.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')set(false);});
+  // Lock page scroll while open so the feed underneath can't move (or lazy-load
+  // more photos) behind the overlay; closing returns to exactly where you were.
+  function set(on){lb.classList.toggle('on',on);
+    document.documentElement.classList.toggle('lb-open',on);}
 })();
 </script>"""
 
@@ -542,6 +601,8 @@ CSS = """
   --accent:#c9745b; --line:#ece5da; --chip:#f1ece3;
 }
 *{box-sizing:border-box}
+html{scrollbar-gutter:stable;}
+html.lb-open{overflow:hidden;}
 body{margin:0;background:var(--bg);color:var(--ink);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   line-height:1.55;}
@@ -580,8 +641,11 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .media{display:block;width:100%;max-width:640px;height:auto;border-radius:10px;
   margin:10px 0;background:#000;}
 img.media{cursor:zoom-in;}
-.media-grid{column-width:200px;column-gap:8px;margin:10px 0;}
-.media-grid .media{max-width:100%;margin:0 0 8px;break-inside:avoid;}
+.media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+  gap:8px;margin:10px 0;}
+.media-grid .media{margin:0;max-width:none;}
+.media-grid img.media{aspect-ratio:1;height:auto;object-fit:cover;}
+.media-grid video.media,.media-grid .missing{grid-column:1/-1;}
 .missing{color:#b00;background:#fff3f3;border:1px solid #f3d0d0;border-radius:8px;
   padding:8px 10px;font-size:.85rem;}
 .foot{max-width:820px;margin:40px auto;padding:16px 20px;color:var(--muted);
